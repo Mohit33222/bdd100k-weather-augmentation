@@ -100,9 +100,4 @@ This creates:
 
 ```
 
----
 
-✅ This README.md will make your repo look neat & professional when Monita opens it.  
-
-👉 Do you want me to also prepare a **short GitHub commit + push command block** so you can copy–paste it in one go to upload everything (scripts + report + README) without errors?
-```
