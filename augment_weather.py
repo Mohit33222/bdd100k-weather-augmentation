@@ -1,12 +1,3 @@
-"""
-augment_dataset.py
-
-- Reads images from bdd100k/images_10k/<split>
-- Reads YOLO labels from bdd100k/yolo_format/<split>/<image>.txt
-- Creates augmented images with suffixes: _fog, _rain, _lowlight, _snow
-- Copies YOLO labels to bdd100k/augmented_labels/<split>/<image>_<effect>.txt
-"""
-
 import os
 import random
 from glob import glob
@@ -14,9 +5,10 @@ from tqdm import tqdm
 import shutil
 import cv2
 import numpy as np
+
 # ------------- CONFIG -------------
 BASE = "bdd100k"
-IMAGES_ROOT = os.path.join(BASE, "images_10k")        # original images
+IMAGES_ROOT = os.path.join(BASE, "images_100k")        # original images
 YOLO_LABELS_ROOT = os.path.join(BASE, "yolo_format")  # existing YOLO labels
 AUG_IMAGES_ROOT = os.path.join(BASE, "augmented")     # output augmented images
 AUG_LABELS_ROOT = os.path.join(BASE, "augmented_labels") # output augmented labels
@@ -45,60 +37,158 @@ def copy_label(orig_basename, split, out_basename):
         return True
     return False
 
-# ------------- Augmentation Effects (OpenCV) -------------
+# ---------------- EXTREME EFFECTS ----------------
+
 def add_fog(img):
-    overlay = img.copy()
+    """
+    Strong fog with depth gradient and color tint.
+    """
     h, w = img.shape[:2]
-    fog = np.full((h, w, 3), 255, dtype=np.uint8)
-    alpha = random.uniform(0.15, 0.45)
-    return cv2.addWeighted(overlay, 1 - alpha, fog, alpha, 0)
+    # create a depth-like gradient (closer = less fog, far = more fog)
+    grad = np.linspace(0, 1, h).reshape(h, 1)  # vertical depth gradient
+    grad = cv2.resize(grad, (w, h))
+    # fog strength more aggressive
+    base_alpha = random.uniform(0.35, 0.75)  # stronger than before
+    # add slight horizontal variation
+    hor_variation = (np.random.rand(h, w) * 0.15).astype(np.float32)
+    alpha = np.clip(base_alpha * grad + hor_variation, 0.0, 0.92)
+
+    # fog color tint (warm or cool haze)
+    if random.random() < 0.5:
+        tint = np.array([220, 230, 255], dtype=np.float32)  # cool bluish fog
+    else:
+        tint = np.array([235, 225, 200], dtype=np.float32)  # warm fog
+
+    fog_layer = np.ones_like(img, dtype=np.float32) * tint.reshape(1,1,3)
+    img_f = img.astype(np.float32)
+    alpha_3 = alpha[..., None]
+    out = img_f * (1 - alpha_3) + fog_layer * alpha_3
+    out = np.clip(out, 0, 255).astype(np.uint8)
+
+    # subtle blur to simulate scattering
+    ksize = random.choice([5,7,9])
+    out = cv2.GaussianBlur(out, (ksize, ksize), 0)
+
+    return out
 
 def add_rain(img):
+    """
+    Heavy rain: many streaks + motion blur to create sheets of rain.
+    """
     h, w = img.shape[:2]
-    rain_layer = np.zeros_like(img, dtype=np.uint8)
-    n_streaks = max(200, (w*h)//5000)
+    rain_layer = np.zeros((h, w, 3), dtype=np.uint8)
+
+    # increase number of streaks significantly
+    n_streaks = int((w * h) / 1500)  # denser than previous
     for _ in range(n_streaks):
         x = random.randint(0, w-1)
         y = random.randint(0, h-1)
-        length = random.randint(8, 20)
-        x2 = min(w-1, x + random.randint(1,3))
+        length = random.randint(int(h*0.02), int(h*0.12))  # longer streaks
+        slant = random.randint(-10, 10)
+        x2 = min(w-1, max(0, x + slant))
         y2 = min(h-1, y + length)
-        cv2.line(rain_layer, (x, y), (x2, y2), (200,200,200), 1)
-    rain = cv2.blur(rain_layer, (3,3))
-    return cv2.addWeighted(img, 0.8, rain, 0.2, 0)
+        thickness = random.choice([1,1,2])  # some thicker streaks
+        color = (200 + random.randint(0,35),) * 3
+        cv2.line(rain_layer, (x, y), (x2, y2), color, thickness)
+
+    # blur and motion-blur (directional) to simulate falling sheets
+    rain_gray = cv2.cvtColor(rain_layer, cv2.COLOR_BGR2GRAY)
+    rain_blur = cv2.GaussianBlur(rain_gray, (3,3), 0)
+    # directional blur by convolving with a vertical kernel
+    k_len = random.choice([7, 11, 15])
+    kernel = np.zeros((k_len, k_len))
+    kernel[:, k_len//2] = np.ones(k_len)
+    kernel = kernel / k_len
+    rain_mb = cv2.filter2D(rain_blur, -1, kernel)
+
+    rain_norm = cv2.normalize(rain_mb, None, 0, 255, cv2.NORM_MINMAX)
+    rain_col = cv2.merge([rain_norm, rain_norm, rain_norm])
+
+    # merge with original - heavier effect: increase weight of rain layer
+    alpha = 0.6 if random.random() < 0.7 else 0.5
+    out = cv2.addWeighted(img, 1 - alpha, rain_col.astype(np.uint8), alpha, 0)
+
+    # slight contrast drop and blur
+    out = cv2.GaussianBlur(out, (3,3), 0)
+    out = cv2.addWeighted(out, 0.95, np.zeros_like(out), 0, -15)  # lower brightness a bit
+
+    return out
 
 def add_lowlight(img):
-    gamma = random.uniform(1.8, 2.4)
+    """
+    Very dark scenes + stronger vignette + bright headlight-like flares (random).
+    """
+    h, w = img.shape[:2]
+    # stronger gamma darkening
+    gamma = random.uniform(2.2, 3.2)  # more dark
     invGamma = 1.0 / gamma
     table = np.array([((i/255.0) ** invGamma) * 255 for i in range(256)]).astype("uint8")
     dark = cv2.LUT(img, table)
-    if random.random() < 0.2:
-        h, w = img.shape[:2]
-        center = (random.randint(int(w*0.2), int(w*0.8)), random.randint(int(h*0.2), int(h*0.8)))
-        radius = random.randint(int(min(w,h)*0.05), int(min(w,h)*0.12))
-        mask = np.zeros_like(dark, dtype=np.uint8)
-        cv2.circle(mask, center, radius, (255,230,200), -1)
-        dark = cv2.addWeighted(dark, 1.0, mask, 0.12, 0)
-    return cv2.GaussianBlur(dark, (3,3), 0)
+
+    # strong vignette
+    X_resultant_kernel = cv2.getGaussianKernel(w, w*0.6)
+    Y_resultant_kernel = cv2.getGaussianKernel(h, h*0.6)
+    kernel = Y_resultant_kernel * X_resultant_kernel.T
+    mask = kernel / np.linalg.norm(kernel)
+    mask = mask / np.max(mask)
+    # invert mask so edges are darker
+    vignette = (mask[..., None] * 0.6 + 0.4)  # control center vs edge
+    dark = (dark.astype(np.float32) * vignette).astype(np.uint8)
+
+    # optionally add headlight-like bright blobs to simulate glare sources (cars)
+    if random.random() < 0.8:
+        n_flares = random.randint(1, 3)
+        for _ in range(n_flares):
+            cx = random.randint(int(w*0.1), int(w*0.9))
+            cy = random.randint(int(h*0.2), int(h*0.9))
+            rad = random.randint(int(min(w,h)*0.03), int(min(w,h)*0.12))
+            overlay = dark.copy().astype(np.float32)
+            cv2.circle(overlay, (cx, cy), rad, (255, 240, 220), -1)
+            alpha = random.uniform(0.08, 0.22)
+            dark = cv2.addWeighted(dark.astype(np.float32), 1.0, overlay, alpha, 0).astype(np.uint8)
+            # add small bloom
+            dark = cv2.GaussianBlur(dark, (rad//2*2+1, rad//2*2+1), 0)
+
+    # final small blur
+    dark = cv2.GaussianBlur(dark, (3,3), 0)
+    return dark
 
 def add_snow(img):
+    """
+    Heavy snow: dense and larger flakes, some bloom, overall whitened atmosphere.
+    """
     h, w = img.shape[:2]
     snow_layer = np.zeros((h, w), dtype=np.uint8)
-    n_dots = max(300, (w*h)//8000)
+
+    # denser, larger flakes
+    n_dots = int((w*h) / 3000)  # heavier than before
     for _ in range(n_dots):
         x = random.randint(0, w-1)
         y = random.randint(0, h-1)
-        r = random.randint(0, 2)
-        cv2.circle(snow_layer, (x,y), r, 255, -1)
-    snow = cv2.GaussianBlur(snow_layer, (7,7), 0)
-    alpha = (snow.astype(np.float32) / 255.0) * random.uniform(0.35, 0.8)
-    alpha = alpha[..., None]
-    out = (img.astype(np.float32) * (1 - alpha) + 255 * alpha).astype(np.uint8)
-    k = random.choice([1,3,5])
-    if k > 1:
-        kernel = np.zeros((k,k))
-        kernel[k//2,:] = np.ones(k)/k
+        r = random.randint(0, 3)  # bigger flakes occasionally
+        cv2.circle(snow_layer, (x, y), r, 255, -1)
+
+    # blur snow for depth and some streaks
+    snow_blur = cv2.GaussianBlur(snow_layer, (7,7), 0)
+
+    # make noise-based alpha mask
+    alpha = (snow_blur.astype(np.float32) / 255.0) * random.uniform(0.5, 0.95)
+    alpha = np.clip(alpha[..., None], 0.0, 0.95)
+
+    out = img.astype(np.float32) * (1 - alpha) + 255 * alpha
+    out = np.clip(out, 0, 255).astype(np.uint8)
+
+    # occasional motion streaks for windy snow
+    if random.random() < 0.5:
+        k_len = random.choice([5,9])
+        kernel = np.zeros((k_len, k_len))
+        kernel[k_len//2, :] = np.ones(k_len)
+        kernel = kernel / k_len
         out = cv2.filter2D(out, -1, kernel)
+
+    # slight global brightness increase to simulate whitened scene
+    out = cv2.addWeighted(out, 1.05, np.zeros_like(out), 0, 10)
+
     return out
 
 EFFECTS = {
@@ -141,10 +231,16 @@ def augment_split(split):
                 labels_copied += 1
 
         for eff_name, eff_func in EFFECTS.items():
-            aug_img = eff_func(img)
+            try:
+                aug_img = eff_func(img)
+            except Exception as e:
+                print(f"[WARN] effect {eff_name} failed for {basename}: {e}")
+                continue
+
             out_name = f"{basename}_{eff_name}.jpg"
             out_path = os.path.join(out_img_dir, out_name)
-            cv2.imwrite(out_path, aug_img)
+            # strong JPEG quality to keep details (or adjust as needed)
+            cv2.imwrite(out_path, aug_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
             augmented_saved += 1
 
             # copy label for augmented
