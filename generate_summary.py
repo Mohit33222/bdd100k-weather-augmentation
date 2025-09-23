@@ -5,12 +5,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from shutil import copy2
 from PIL import Image
+from tqdm import tqdm   # ✅ NEW
 
 # ---------- CONFIG ----------
 BASE = "bdd100k"
-ORIG_IMAGES = os.path.join(BASE, "images_10k")      # original images split dirs inside
-YOLO_LABELS = os.path.join(BASE, "yolo_format")     # YOLO labels (txt) per split
-AUG_IMAGES = os.path.join(BASE, "augmented")        # augmented images produced earlier
+ORIG_IMAGES = os.path.join(BASE, "100k")
+YOLO_LABELS = os.path.join(BASE, "yolo_format")
+AUG_IMAGES = os.path.join(BASE, "augmented")
 AUG_LABELS = os.path.join(BASE, "augmented_labels")
 REPORT_DIR = "report"
 REPORT_IMG_DIR = os.path.join(REPORT_DIR, "images")
@@ -19,7 +20,7 @@ CLASSES = [
     "person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle",
     "traffic light", "traffic sign"
 ]
-SAMPLE_PER_SPLIT = 3   # how many sample originals to pick per split (fewer if small)
+SAMPLE_PER_SPLIT = 3
 # -----------------------------
 
 os.makedirs(REPORT_DIR, exist_ok=True)
@@ -34,7 +35,8 @@ def parse_yolo_labels(folder):
     counter = Counter()
     if not os.path.isdir(folder):
         return counter
-    for f in glob(os.path.join(folder, "*.txt")):
+    files = glob(os.path.join(folder, "*.txt"))
+    for f in tqdm(files, desc=f"Parsing labels in {os.path.basename(folder)}"):
         with open(f, "r", encoding="utf-8") as fo:
             for line in fo:
                 parts = line.strip().split()
@@ -49,7 +51,6 @@ def parse_yolo_labels(folder):
     return counter
 
 def plot_and_save_distribution(counter, title, out_path):
-    # ensure deterministic order of classes for comparable plots
     labels = CLASSES
     counts = [counter.get(l, 0) for l in labels]
     y_pos = np.arange(len(labels))
@@ -68,8 +69,7 @@ def pick_samples_for_split(split, n_samples=3):
     if not os.path.isdir(src_dir):
         return []
     imgs = sorted(glob(os.path.join(src_dir, "*.jpg")) + glob(os.path.join(src_dir, "*.png")))
-    samples = imgs[:n_samples]
-    return samples
+    return imgs[:n_samples]
 
 def find_aug_variants_for_image(img_path, split):
     base = os.path.splitext(os.path.basename(img_path))[0]
@@ -88,6 +88,7 @@ def find_aug_variants_for_image(img_path, split):
 summary = {}
 
 for split in SPLITS:
+    print(f"\n=== Processing split: {split} ===")
     orig_img_dir = os.path.join(ORIG_IMAGES, split)
     yolo_dir = os.path.join(YOLO_LABELS, split)
     aug_img_dir = os.path.join(AUG_IMAGES, split)
@@ -107,27 +108,22 @@ for split in SPLITS:
         "aug_label_dist": aug_lbls
     }
 
-    # plots
     plot_and_save_distribution(orig_lbls, f"{split} - Original Class Distribution", os.path.join(REPORT_IMG_DIR, f"{split}_orig_dist.png"))
     plot_and_save_distribution(aug_lbls, f"{split} - Augmented Class Distribution", os.path.join(REPORT_IMG_DIR, f"{split}_aug_dist.png"))
 
 # Pick sample images and copy to report/images
-sample_table_rows = []  # will hold (split, orig_rel, fog_rel, rain_rel, lowlight_rel, snow_rel)
+sample_table_rows = []
 for split in SPLITS:
     samples = pick_samples_for_split(split, SAMPLE_PER_SPLIT)
-    # choose up to SAMPLE_PER_SPLIT samples, but if none available, skip
-    for img_path in samples:
+    for img_path in tqdm(samples, desc=f"Copying samples for {split}"):
         base = os.path.splitext(os.path.basename(img_path))[0]
-        # copy original sample
         dest_orig = os.path.join(REPORT_IMG_DIR, f"{split}_{base}.jpg")
         try:
             copy2(img_path, dest_orig)
             orig_rel = os.path.relpath(dest_orig, REPORT_DIR)
         except Exception:
             orig_rel = ""
-        # find augmented variants
         variants = find_aug_variants_for_image(img_path, split)
-        # expected order: fog, rain, lowlight, snow
         fog_rel = rain_rel = low_rel = snow_rel = ""
         for v in variants:
             name = os.path.basename(v)
