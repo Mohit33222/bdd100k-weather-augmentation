@@ -9,13 +9,6 @@ and produce a **comparative summary** of datasets.
 
 ---
 
-## 👨‍👩‍👧 Team Roles
-- **Mohit** → Augmentation pipeline, dataset preprocessing, GitHub repo  
-- **Moubani (Monita)** → Comparative analysis, charts, and report writing  
-- Others → Model training and simulation (later stages)
-
----
-
 ## 🚀 Features
 - ✅ JSON → YOLO label conversion (`convert_bdd_to_yolo.py`)  
 - ✅ Weather augmentation (`augment_dataset.py`)  
@@ -100,6 +93,7 @@ This creates:
 
 
 ```
+
 
 
 
